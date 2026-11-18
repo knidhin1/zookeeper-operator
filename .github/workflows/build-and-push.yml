@@ -1,0 +1,75 @@
+name: Build and Push ZooKeeper Images
+
+on:
+  push:
+    branches:
+      - master
+    tags:
+      - "v*"
+      - "zk-*"
+  workflow_dispatch: # Allows manual trigger from GitHub Actions UI
+
+env:
+  OPERATOR_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/zookeeper-operator
+  ZK_IMAGE: ${{ secrets.DOCKERHUB_USERNAME }}/zookeeper
+
+jobs:
+  build-and-push:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0 # Needed so Makefile git-describe versioning works
+
+      - name: Set up Go
+        uses: actions/setup-go@v5
+        with:
+          go-version-file: go.mod
+          cache: true
+
+      - name: Set up Java 21 (Required for Gradle zu client build)
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: "21"
+
+      - name: Set up Docker Buildx
+        uses: docker/setup-buildx-action@v3
+
+      - name: Log in to Docker Hub
+        uses: docker/login-action@v3
+        with:
+          username: ${{ secrets.DOCKERHUB_USERNAME }}
+          password: ${{ secrets.DOCKERHUB_TOKEN }}
+
+      - name: Build Operator Image
+        run: make build
+
+      - name: Build ZooKeeper Server Image
+        run: make build-zk-image
+
+      - name: Tag and Push Images
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          ZK_VER=$(./scripts/zookeeper-version.sh)
+
+          echo "Detected ZooKeeper version: ${ZK_VER}"
+
+          # 1. Tag and push Operator image
+          docker tag adobe/zookeeper-operator:latest ${OPERATOR_IMAGE}:latest
+          docker tag adobe/zookeeper-operator:latest ${OPERATOR_IMAGE}:0.2.15-${SHORT_SHA}
+          docker push ${OPERATOR_IMAGE}:latest
+          docker push ${OPERATOR_IMAGE}:0.2.15-${SHORT_SHA}
+
+          # 2. Tag and push ZooKeeper Server image (matches exact local image name built by Makefile)
+          LOCAL_ZK_IMAGE=$(docker images --format "{{.Repository}}:{{.Tag}}" | grep "zookeeper:" | grep -v "operator" | head -n 1)
+          echo "Local ZK image built: ${LOCAL_ZK_IMAGE}"
+
+          docker tag "${LOCAL_ZK_IMAGE}" ${ZK_IMAGE}:${ZK_VER}-latest
+          docker tag "${LOCAL_ZK_IMAGE}" ${ZK_IMAGE}:${ZK_VER}-${SHORT_SHA}
+          docker push ${ZK_IMAGE}:${ZK_VER}-latest
+          docker push ${ZK_IMAGE}:${ZK_VER}-${SHORT_SHA}
